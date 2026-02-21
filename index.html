@@ -50,7 +50,7 @@
 
         <div id="step-1">
             <h2 class="font-semibold mb-2">Шаг 1: Выбор области</h2>
-            <p class="text-xs text-gray-500 mb-4">Передвиньте карту. Данные будут скачаны для видимой прямоугольной области. <br><i>(Не выбирайте слишком большой район, чтобы сервер не выдал ошибку)</i></p>
+            <p class="text-xs text-gray-500 mb-4">Передвиньте карту. Данные будут скачаны для видимой прямоугольной области. <br><i>(Масштаб ограничен, чтобы предотвратить ошибку сервера из-за слишком большой площади)</i></p>
             
             <button id="extract-btn" class="w-full bg-yellow-400 hover:bg-yellow-500 text-gray-900 font-bold py-3 px-4 rounded-full transition duration-200 flex justify-center items-center">
                 <span>Сгенерировать 3D GeoJSON</span>
@@ -104,7 +104,14 @@
     <script>
         // Инициализация 2D карты (Leaflet)
         // Координаты центра Саранска по умолчанию
-        const map2d = L.map('map-2d').setView([54.187888, 45.18692], 16);
+        const map2d = L.map('map-2d', {
+            minZoom: 15, // Ограничиваем отдаление, чтобы не выбрали весь город
+            maxBounds: [
+                [54.100, 45.000], // Юго-запад Саранска
+                [54.250, 45.350]  // Северо-восток Саранска
+            ] // Не даем уйти далеко от Саранска
+        }).setView([54.187888, 45.18692], 16);
+        
         L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
             attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
             maxZoom: 19
