@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Генератор 3D-зданий Саранска (GeoJSON)</title>
+    
+    <!-- Tailwind CSS для стилей -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Leaflet для 2D карты выбора области -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- MapLibre GL JS для встроенного 3D предпросмотра (альтернатива Kepler.gl) -->
+    <script src="https://unpkg.com/maplibre-gl@3.3.1/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@3.3.1/dist/maplibre-gl.css" rel="stylesheet" />
+
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; }
+        #map-2d, #map-3d { width: 100%; height: 100%; position: absolute; top: 0; left: 0; }
+        #map-3d { display: none; } /* Скрыт по умолчанию */
+        
+        /* Прицел для центра карты */
+        .crosshair {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 20px;
+            height: 20px;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            z-index: 1000;
+        }
+        .crosshair::before, .crosshair::after {
+            content: '';
+            position: absolute;
+            background: rgba(255, 0, 0, 0.7);
+        }
+        .crosshair::before { top: 9px; left: 0; width: 20px; height: 2px; }
+        .crosshair::after { top: 0; left: 9px; width: 2px; height: 20px; }
+    </style>
+</head>
+<body class="flex h-screen bg-gray-50 text-gray-800 font-sans">
+
+    <!-- Левая панель управления -->
+    <div class="w-1/3 max-w-sm bg-white shadow-xl z-10 flex flex-col p-6 relative">
+        <h1 class="text-2xl font-bold mb-2 text-yellow-500">3D GeoJSON Экстрактор</h1>
+        <p class="text-sm text-gray-600 mb-6">Выберите район на карте и скачайте готовую 3D-модель со всеми этажами.</p>
+
+        <div id="step-1">
+            <h2 class="font-semibold mb-2">Шаг 1: Выбор области</h2>
+            <p class="text-xs text-gray-500 mb-4">Передвиньте карту. Данные будут скачаны для видимой прямоугольной области. <br><i>(Не выбирайте слишком большой район, чтобы сервер не выдал ошибку)</i></p>
+            
+            <button id="extract-btn" class="w-full bg-yellow-400 hover:bg-yellow-500 text-gray-900 font-bold py-3 px-4 rounded-full transition duration-200 flex justify-center items-center">
+                <span>Сгенерировать 3D GeoJSON</span>
+            </button>
+            <div id="loading" class="hidden mt-4 text-center text-yellow-500 font-medium animate-pulse">
+                Загрузка данных с серверов OSM...
+            </div>
+        </div>
+
+        <div id="step-2" class="hidden flex flex-col mt-4 border-t pt-4">
+            <h2 class="font-semibold text-green-600 mb-2">✓ Успешно!</h2>
+            <p class="text-sm text-gray-600 mb-4" id="stats-text"></p>
+            
+            <button id="download-btn" class="w-full bg-yellow-400 hover:bg-yellow-500 text-gray-900 font-bold py-2 px-4 rounded-full mb-3 transition duration-200">
+                ↓ Скачать файл еще раз
+            </button>
+            
+            <button id="kepler-btn" class="w-full bg-black hover:bg-gray-800 text-white font-bold py-2 px-4 rounded-full mb-4 transition duration-200">
+                ⬈ Открыть Kepler.gl
+            </button>
+
+            <div class="bg-yellow-50 p-3 rounded-xl text-xs text-yellow-800 border border-yellow-200">
+                <strong>Как посмотреть в Kepler.gl:</strong><br>
+                1. Нажмите кнопку выше.<br>
+                2. Перетащите скачанный файл <code class="bg-white px-1 rounded">buildings.geojson</code> в окно Kepler.<br>
+                3. В настройках слоя выберите "3D Building" и поле "height" для высоты.
+            </div>
+
+            <button id="reset-btn" class="mt-auto pt-4 text-sm text-gray-500 hover:text-gray-800 underline text-center">
+                Выбрать другой район
+            </button>
+        </div>
+    </div>
+
+    <!-- Правая панель (Карты) -->
+    <div class="flex-1 relative bg-gray-200">
+        <!-- 2D Карта (Leaflet) -->
+        <div id="map-2d">
+            <div class="crosshair"></div>
+        </div>
+        
+        <!-- 3D Карта (MapLibre) -->
+        <div id="map-3d"></div>
+        
+        <!-- Индикатор режима -->
+        <div id="mode-badge" class="absolute top-4 right-4 bg-white px-3 py-1 rounded shadow text-sm font-bold text-gray-700 z-[1000]">
+            Режим: Выбор 2D
+        </div>
+    </div>
+
+    <script>
+        // Инициализация 2D карты (Leaflet)
+        // Координаты центра Саранска по умолчанию
+        const map2d = L.map('map-2d').setView([54.187888, 45.18692], 16);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+            attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+            maxZoom: 19
+        }).addTo(map2d);
+
+        let map3d = null; // Переменная для 3D карты
+        let currentGeoJson = null; // Хранилище сгенерированных данных
+
+        // Элементы интерфейса
+        const extractBtn = document.getElementById('extract-btn');
+        const loadingDiv = document.getElementById('loading');
+        const step1Div = document.getElementById('step-1');
+        const step2Div = document.getElementById('step-2');
+        const statsText = document.getElementById('stats-text');
+        const modeBadge = document.getElementById('mode-badge');
+        
+        // Обработка кнопки генерации
+        extractBtn.addEventListener('click', async () => {
+            extractBtn.classList.add('hidden');
+            loadingDiv.classList.remove('hidden');
+            
+            try {
+                // 1. Получаем границы видимой области карты
+                const bounds = map2d.getBounds();
+                // Overpass API формат: south, west, north, east
+                const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+                
+                // 2. Формируем запрос к Overpass API (только здания, формат JSON)
+                const query = `
+                    [out:json][timeout:25];
+                    (
+                      way["building"](${bbox});
+                      relation["building"](${bbox});
+                    );
+                    out geom;
+                `;
+
+                // 3. Отправляем запрос
+                const response = await fetch('https://overpass-api.de/api/interpreter', {
+                    method: 'POST',
+                    body: 'data=' + encodeURIComponent(query)
+                });
+
+                if (!response.ok) throw new Error('Ошибка сервера Overpass');
+                const data = await response.json();
+
+                // 4. Парсим данные и создаем GeoJSON
+                const features = [];
+                let buildingsWithLevels = 0;
+
+                data.elements.forEach(element => {
+                    if (element.type === 'way' && element.geometry) {
+                        const tags = element.tags || {};
+                        
+                        // Получаем этажность
+                        let levelsStr = tags['building:levels'];
+                        let levels = parseInt(levelsStr);
+                        
+                        if (!isNaN(levels)) {
+                            buildingsWithLevels++;
+                        } else {
+                            levels = 2; // По умолчанию 2 этажа, если данных нет
+                        }
+                        
+                        // 1 этаж = 3 метра высоты
+                        const height = levels * 3;
+
+                        // Формируем координаты полигона
+                        const coords = element.geometry.map(node => [node.lon, node.lat]);
+                        // Замыкаем полигон
+                        if (coords[0][0] !== coords[coords.length-1][0] || coords[0][1] !== coords[coords.length-1][1]) {
+                            coords.push(coords[0]);
+                        }
+
+                        features.push({
+                            type: "Feature",
+                            properties: {
+                                id: element.id,
+                                levels: levels,
+                                height: height,
+                                street: tags['addr:street'] || 'Неизвестно',
+                                housenumber: tags['addr:housenumber'] || ''
+                            },
+                            geometry: {
+                                type: "Polygon",
+                                coordinates: [coords]
+                            }
+                        });
+                    }
+                });
+
+                currentGeoJson = {
+                    type: "FeatureCollection",
+                    features: features
+                };
+
+                // 5. Обновляем интерфейс
+                statsText.innerHTML = `Найдено зданий: <b>${features.length}</b><br>Из них с известной этажностью: <b>${buildingsWithLevels}</b>`;
+                step1Div.classList.add('hidden');
+                step2Div.classList.remove('hidden');
+                
+                // 6. Автоматическое скачивание файла
+                downloadGeoJSON();
+
+                // 7. Показываем 3D предпросмотр прямо в приложении
+                show3DPreview();
+
+            } catch (error) {
+                alert('Произошла ошибка при загрузке данных: ' + error.message);
+                extractBtn.classList.remove('hidden');
+            } finally {
+                loadingDiv.classList.add('hidden');
+            }
+        });
+
+        // Функция скачивания GeoJSON
+        function downloadGeoJSON() {
+            if (!currentGeoJson) return;
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(currentGeoJson));
+            const downloadAnchorNode = document.createElement('a');
+            downloadAnchorNode.setAttribute("href", dataStr);
+            downloadAnchorNode.setAttribute("download", "saransk_buildings_3d.geojson");
+            document.body.appendChild(downloadAnchorNode); // Требуется для Firefox
+            downloadAnchorNode.click();
+            downloadAnchorNode.remove();
+        }
+
+        // Обработка кнопок на шаге 2
+        document.getElementById('download-btn').addEventListener('click', downloadGeoJSON);
+        
+        document.getElementById('kepler-btn').addEventListener('click', () => {
+            // Открываем Kepler.gl в новой вкладке. 
+            // (К сожалению, передать GeoJSON в Kepler автоматически через URL нельзя из-за ограничений размера,
+            // поэтому мы просто открываем сайт, а файл у пользователя уже скачан).
+            window.open('https://kepler.gl/demo', '_blank');
+        });
+
+        document.getElementById('reset-btn').addEventListener('click', () => {
+            step2Div.classList.add('hidden');
+            step1Div.classList.remove('hidden');
+            extractBtn.classList.remove('hidden');
+            document.getElementById('map-3d').style.display = 'none';
+            document.getElementById('map-2d').style.display = 'block';
+            modeBadge.innerText = 'Режим: Выбор 2D';
+        });
+
+        // Функция встроенной 3D визуализации
+        function show3DPreview() {
+            document.getElementById('map-2d').style.display = 'none';
+            const map3dContainer = document.getElementById('map-3d');
+            map3dContainer.style.display = 'block';
+            modeBadge.innerText = 'Режим: 3D Предпросмотр (встроенный)';
+
+            const center = map2d.getCenter();
+
+            if (!map3d) {
+                // Инициализируем MapLibre только один раз
+                map3d = new maplibregl.Map({
+                    container: 'map-3d',
+                    style: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
+                    center: [center.lng, center.lat],
+                    zoom: map2d.getZoom(),
+                    pitch: 60, // Наклон камеры для 3D
+                    bearing: -20, // Поворот
+                    antialias: true
+                });
+
+                map3d.addControl(new maplibregl.NavigationControl());
+
+                map3d.on('load', () => {
+                    add3DLayer();
+                });
+            } else {
+                map3d.setCenter([center.lng, center.lat]);
+                map3d.setZoom(map2d.getZoom());
+                // Обновляем данные если карта уже существует
+                if (map3d.getSource('osm-buildings')) {
+                    map3d.getSource('osm-buildings').setData(currentGeoJson);
+                } else {
+                    add3DLayer();
+                }
+            }
+        }
+
+        function add3DLayer() {
+            if (!map3d || !map3d.loaded() || !currentGeoJson) return;
+            
+            if(!map3d.getSource('osm-buildings')){
+                map3d.addSource('osm-buildings', {
+                    'type': 'geojson',
+                    'data': currentGeoJson
+                });
+
+                map3d.addLayer({
+                    'id': '3d-buildings-layer',
+                    'source': 'osm-buildings',
+                    'type': 'fill-extrusion',
+                    'paint': {
+                        'fill-extrusion-color': [
+                            'interpolate', ['linear'], ['get', 'height'],
+                            0, '#e2e8f0',
+                            15, '#cbd5e1',
+                            30, '#94a3b8',
+                            50, '#64748b'
+                        ],
+                        'fill-extrusion-height': ['get', 'height'],
+                        'fill-extrusion-base': 0,
+                        'fill-extrusion-opacity': 0.85
+                    }
+                });
+            }
+        }
+    </script>
+</body>
+</html>
